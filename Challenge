@@ -1,0 +1,244 @@
+--1--
+--Create indexes to enhance query performance on tables with a large volume of data.
+CREATE INDEX idx_item_loc_soh_loc ON item_loc_soh (loc);
+CREATE INDEX idx_item_loc_soh_dept ON item_loc_soh (dept);
+CREATE INDEX idx_loc_loc ON loc (loc);
+CREATE INDEX idx_item_item ON item (item);
+--It is also necessary to create primary keys to prevent duplication of results.
+ALTER TABLE item_loc_soh
+ADD CONSTRAINT pk_item_loc_soh PRIMARY KEY (item, loc);
+
+ALTER TABLE item
+ADD CONSTRAINT pk_item UNIQUE (item);
+
+--
+--2--
+--Given the high concurrent access, we can consider partitioning the table item_loc_soh based on loc . This can improve performance
+CREATE TABLESPACE partc_ts
+DATAFILE 'partc_ts.dbf'
+SIZE 20M AUTOEXTEND ON;
+
+ALTER TABLE item_loc_soh
+MODIFY PARTITION BY RANGE (loc)
+(PARTITION partc1 VALUES LESS THAN (100) TABLESPACE partc_ts,
+ PARTITION partc2 VALUES LESS THAN (200) TABLESPACE partc_ts,
+ PARTITION partc3 VALUES LESS THAN (300) TABLESPACE partc_ts),
+ PARTITION partc4 VALUES LESS THAN (MAXVALUE) TABLESPACE partc_ts);
+ 
+ --if necessary create more
+ 
+ 
+ --
+ --3--
+ /*
+ Partition creation, index creation, and a correct SQL statement
+ */
+ 
+ 
+ --
+ --4--
+ --created view
+
+ CREATE OR REPLACE VIEW item_loc_soh_view AS
+SELECT item, loc, unit_cost, stock_on_hand
+FROM item_loc_soh;
+
+--
+--5--
+-- Tables dept and users created
+
+create table dept(
+    dept_id number(4) not null,
+    dept_desc varchar2(25) not null
+);
+create index idx_dept_id on dept(dept_id);
+
+ALTER TABLE dept
+ADD CONSTRAINT pk_dept_id UNIQUE (dept_id);
+
+
+create table users(
+    user_id number(10) not null,
+    user_desc varchar2(50) not null
+);
+create index idx_user_id on users(user_id);
+ALTER TABLE users
+ADD CONSTRAINT pk_user_id UNIQUE (user_id);
+
+-- if the same user can have multiple departments and the same department can have multiple users (if not, a primary key should be used to prevent duplicates).
+CREATE TABLE user_dept_association (
+    user_id NUMBER,
+    dept_id NUMBER,
+    CONSTRAINT fk_dept FOREIGN KEY (dept_id) REFERENCES dept(dept_id),
+    CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+--
+
+
+--6--
+
+-- need to create a new table
+
+CREATE TABLE item_loc_data (
+    item VARCHAR2(25) NOT NULL,
+    loc NUMBER(10) NOT NULL,
+    dept NUMBER(4) NOT NULL,
+    unit_cost NUMBER(20,4) NOT NULL,
+    stock_on_hand NUMBER(12,4) NOT NULL,
+    total_stock_value NUMBER(20,4) -- Coluna para armazenar o valor total do estoque
+);
+
+CREATE INDEX idx_item ON item_loc_data(item);
+
+-- only do this if we dont wnat duplicates
+
+ALTER TABLE item_loc_data ADD CONSTRAINT pk_item_loc_data PRIMARY KEY (item, loc,total_stock_value);
+
+--create the pkg
+
+CREATE OR REPLACE PACKAGE item_loc_pkg AS
+    PROCEDURE save_item_loc_data;
+END item_loc_pkg;
+/
+
+CREATE OR REPLACE PACKAGE BODY item_loc_pkg AS
+    PROCEDURE save_item_loc_data IS
+    BEGIN
+        
+		INSERT INTO item_loc_data (item, loc, dept, unit_cost, stock_on_hand, total_stock_value)
+        SELECT item, loc, dept, unit_cost, stock_on_hand, unit_cost * stock_on_hand AS total_stock_value
+        FROM item_loc_soh;
+        
+        COMMIT; 
+    END save_item_loc_data;
+END item_loc_pkg;
+/
+-------
+--7--
+
+
+CREATE OR REPLACE FUNCTION FILTER_ITEM_LOC_DATA_BY_DEPT (
+    P_USER_ID IN NUMBER, 
+    P_DEPT_ID IN NUMBER  
+) RETURN SYS_REFCURSOR IS
+    FILTERED_DATA SYS_REFCURSOR;
+BEGIN
+    OPEN FILTERED_DATA FOR
+        SELECT *
+        FROM ITEM_LOC_SOH ILS
+        WHERE ILS.DEPT = P_DEPT_ID
+        AND EXISTS (
+            SELECT 1
+            FROM USER_DEPT_ASSOCIATION UDA
+            WHERE UDA.USER_ID = P_USER_ID
+            AND UDA.DEPT_ID = ILS.DEPT
+        );
+    
+    RETURN FILTERED_DATA;
+END FILTER_ITEM_LOC_DATA_BY_DEPT;
+
+
+-------
+--8--
+-- 
+CREATE OR REPLACE TYPE LOCATIONS_RECORD AS OBJECT (
+    LOC_ID NUMBER,
+    LOC_DESC VARCHAR2(25)
+);
+
+
+CREATE OR REPLACE TYPE LOCATIONS_PIPELINED AS TABLE OF LOCATIONS_RECORD;
+
+CREATE OR REPLACE FUNCTION GET_LOCATION_LOV
+RETURN LOCATIONS_PIPELINED PIPELINED IS
+BEGIN
+    FOR loc_rec IN (SELECT LOC, LOC_DESC FROM LOC ORDER BY LOC_DESC) LOOP
+        PIPE ROW(LOCATIONS_RECORD(loc_rec.LOC, loc_rec.LOC_DESC));
+    END LOOP;
+    
+    RETURN;
+END GET_LOCATION_LOV;
+
+
+--------
+--9--
+
+The provided execution plan indicates that the query is performing a full table scan on ITEM_LOC_SOH, meaning it is reading all rows from the table to fulfill the query. This is typically a costly operation, especially for large tables.
+Recommendation: Create indexes , I already created them when I created th table
+
+<image> 
+
+
+-------
+--10-
+
+CREATE TABLE item_loc_soh_hist (
+    item VARCHAR2(25) NOT NULL,
+    loc NUMBER(10) NOT NULL,
+    dept NUMBER(4) NOT NULL,
+    unit_cost NUMBER(20,4) NOT NULL,
+    stock_on_hand NUMBER(12,4) NOT NULL,
+    modify_date DATE 
+);
+
+-- Create indexes for historical table
+CREATE INDEX idx_loc_item_loc_soh_hist ON item_loc_soh_hist (loc);
+CREATE INDEX idx_dept_item_loc_soh_hist ON item_loc_soh_hist (dept);
+
+-- PL/SQL code for data migration
+DECLARE
+    segment_size NUMBER := 1000; -- Number of rows per segment
+    total_rows NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO total_rows FROM item_loc_soh;
+
+    FOR i IN 1..ROUND(total_rows / segment_size) LOOP
+        FOR rec IN (
+            SELECT item, loc, dept, unit_cost, stock_on_hand
+            FROM (
+                SELECT item, loc, dept, unit_cost, stock_on_hand,
+                       ROW_NUMBER() OVER (ORDER BY item) AS rn
+                FROM item_loc_soh
+            )
+            WHERE rn BETWEEN (i - 1) * segment_size + 1 AND i * segment_size
+        ) LOOP
+            INSERT INTO item_loc_soh_hist (item, loc, dept, unit_cost, stock_on_hand)
+            VALUES (rec.item, rec.loc, rec.dept, rec.unit_cost, rec.stock_on_hand);
+        END LOOP;
+
+        COMMIT; 
+        EXIT WHEN i * segment_size >= total_rows;
+    END LOOP;
+END;
+/
+
+
+ --11--
+ --I couldn't test it on APEX because it kept showing the insufficient privileges error message.
+ 
+ CREATE OR REPLACE DIRECTORY data_files AS '/path/to/directory'; -- change the directory
+DECLARE
+    CURSOR loc_cursor IS
+        SELECT DISTINCT loc FROM item_loc_soh; 
+   v_location item_loc_soh.loc%TYPE;
+    v_file UTL_FILE.FILE_TYPE;
+BEGIN
+    FOR loc_rec IN loc_cursor LOOP
+        
+        v_file := UTL_FILE.FOPEN('DATA_FILES', 'location_' || loc_rec.loc || '.csv', 'W');
+
+        
+        UTL_FILE.PUT_LINE(v_file, 'Item, Department, Unit Cost, Stock On Hand, Stock Value');
+
+        
+        FOR item_rec IN (SELECT item, dept, unit_cost, stock_on_hand, (unit_cost * stock_on_hand) AS stock_value
+                         FROM item_loc_soh
+                         WHERE loc = loc_rec.loc) LOOP
+            
+            UTL_FILE.PUT_LINE(v_file, item_rec.item || ', ' || item_rec.dept || ', ' ||
+                                         item_rec.unit_cost || ', ' || item_rec.stock_on_hand || ', ' ||
+                                         item_rec.stock_value);
+        END LOOP;
+        UTL_FILE.FCLOSE(v_file);
+    END LOOP;
+END;
