@@ -1,0 +1,69 @@
+create table item(
+    item varchar2(25) not null,
+    dept number(4) not null,
+    item_desc varchar2(25) not null
+);
+
+create table loc(
+    loc number(10) not null,
+    loc_desc varchar2(25) not null
+);
+
+create table item_loc_soh(
+item varchar2(25) not null,
+loc number(10) not null,
+dept number(4) not null,
+unit_cost number(20,4) not null,
+stock_on_hand number(12,4) not null
+);
+
+
+--- in average this will take 1s to be executed
+insert into item(item,dept,item_desc)
+select level, round(DBMS_RANDOM.value(1,100)), translate(dbms_random.string('a', 20), 'abcXYZ', level) from dual connect by level <= 10000;
+
+--- in average this will take 1s to be executed
+insert into loc(loc,loc_desc)
+select level+100, translate(dbms_random.string('a', 20), 'abcXYZ', level) from dual connect by level <= 1000;
+
+/*
+-- in average this will take less than 120s to be executed
+insert into item_loc_soh (item, loc, dept, unit_cost, stock_on_hand)
+select item, loc, dept, (DBMS_RANDOM.value(5000,50000)), round(DBMS_RANDOM.value(1000,100000))
+from item, loc;
+
+
+With this insert, I encountered an issue with the tablespace. I couldn't increase because i didn't have privileges to do it
+, and despite requesting more space it wasn't allocated at time. I had to do the insert differently, as shown.
+*/
+
+
+-- Declaring variables
+DECLARE
+    BYTES_LIMIT NUMBER := 15 * 1024 * 1024; -- Byte limit (15 MB)
+    TOTAL_BYTES NUMBER := 0; -- Counter
+BEGIN
+    -- Loop 
+    FOR rec IN (
+        SELECT item, loc, dept, 
+               DBMS_RANDOM.value(5000,50000) AS unit_cost, 
+               round(DBMS_RANDOM.value(1000,100000)) AS stock_on_hand,
+               item + loc + dept + LENGTHB(DBMS_RANDOM.value(5000,50000)) + LENGTHB(round(DBMS_RANDOM.value(1000,100000))) AS row_bytes -- Calculating the total size of the record in bytes
+        FROM item, loc 
+    ) LOOP
+        -- Check if will exceed the byte limit
+        IF TOTAL_BYTES + rec.row_bytes > BYTES_LIMIT THEN
+            EXIT;
+        END IF;
+        
+        -- Insert
+        INSERT INTO item_loc_soh (item, loc, dept, unit_cost, stock_on_hand)
+        VALUES (rec.item, rec.loc, rec.dept, rec.unit_cost, rec.stock_on_hand);
+        
+        
+        TOTAL_BYTES := TOTAL_BYTES + rec.row_bytes;
+    END LOOP;
+    
+    COMMIT; 
+END;
+/
